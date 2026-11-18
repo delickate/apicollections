@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="API Collections">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="0.55" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#bg)"/>
+  <path d="M30 0h68a30 30 0 0 1 30 30v20C92 62 36 62 0 50V30A30 30 0 0 1 30 0z" fill="url(#shine)"/>
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M45 30c-9 0-13 4-13 12v9c0 6-3 10-9 13 6 3 9 7 9 13v9c0 8 4 12 13 12" stroke-width="9"/>
+    <path d="M83 30c9 0 13 4 13 12v9c0 6 3 10 9 13-6 3-9 7-9 13v9c0 8-4 12-13 12" stroke-width="9"/>
+    <path d="M50 64h26" stroke-width="9"/>
+    <path d="M67 52l12 12-12 12" stroke-width="9"/>
+  </g>
+</svg>

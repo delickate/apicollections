@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/
+
+# Build artifacts and signing material — never commit the certificate or password.
+build/icon.ico
+build/icon.png
+build/certs/
