@@ -5,8 +5,9 @@
  * Calls onChange(rows) after every edit; always shows one empty row to type into.
  * With `files: pickFile`, each row can switch between Text and File; a File row
  * holds a local path in `src`, chosen with pickFile() (resolves to a path or null).
+ * With `variables` (a function returning a Map), {{variables}} are highlighted and show their value on hover.
  */
-function kvEditor(rows, onChange, { keyPlaceholder = 'Key', valuePlaceholder = 'Value', toggle = true, files = null } = {}) {
+function kvEditor(rows, onChange, { keyPlaceholder = 'Key', valuePlaceholder = 'Value', toggle = true, files = null, variables = null } = {}) {
   const data = rows.map((row) => {
     const entry = { key: row.key ?? '', value: row.value ?? '', enabled: row.enabled !== false };
     if (files) {
@@ -32,8 +33,9 @@ function kvEditor(rows, onChange, { keyPlaceholder = 'Key', valuePlaceholder = '
         if (placeholder) data.push(current);
       };
 
-      let keyCell = keyInput;
-      let valueCell = valueInput;
+      const withVars = (input) => (variables ? variableField(input, variables) : input);
+      let keyCell = withVars(keyInput);
+      let valueCell = withVars(valueInput);
       if (files) {
         const typeSelect = h('select', {
           class: 'kv-type',
@@ -52,7 +54,7 @@ function kvEditor(rows, onChange, { keyPlaceholder = 'Key', valuePlaceholder = '
           },
         }, h('option', { value: 'text' }, 'Text'), h('option', { value: 'file' }, 'File'));
         typeSelect.value = current.type;
-        keyCell = h('div', { class: 'kv-key' }, keyInput, typeSelect);
+        keyCell = h('div', { class: 'kv-key' }, withVars(keyInput), typeSelect);
 
         if (current.type === 'file') {
           const fileName = current.src ? current.src.split(/[\\/]/).pop() : '';

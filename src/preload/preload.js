@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('desktop', {
     openJson: () => ipcRenderer.invoke('file:openJson'),
     pickUpload: () => ipcRenderer.invoke('file:pickUpload'),
     saveText: (suggestedName, text, filter) => ipcRenderer.invoke('file:saveText', { suggestedName, text, filter }),
+    saveDocx: (suggestedName, model) => ipcRenderer.invoke('file:saveDocx', { suggestedName, model }),
   },
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
 });

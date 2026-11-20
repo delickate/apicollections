@@ -344,6 +344,7 @@ const WS = {
         '-',
         { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
         { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
+        { label: 'Export as API document (Word)', icon: 'upload', action: () => this.exportDocx(node) },
         '-',
         { label: 'Rename', icon: 'edit', action: () => this.rename(node) },
         this.folders.get(node.fid)?.parent_id ? { label: 'Move to top level', icon: 'arrowUp', action: () => this.moveFolder(node.fid, null) } : null,
@@ -364,6 +365,7 @@ const WS = {
         { label: 'Export as Postman v2.1', icon: 'upload', action: () => this.exportCollection(node.cid, 'postman') },
         { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
         { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
+        { label: 'Export as API document (Word)', icon: 'upload', action: () => this.exportDocx(node) },
         '-',
         { label: 'Delete collection', icon: 'trash', danger: true, action: () => this.deleteCollection(node.cid) },
       );
@@ -377,6 +379,7 @@ const WS = {
         '-',
         { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
         { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
+        { label: 'Export as API document (Word)', icon: 'upload', action: () => this.exportDocx(node) },
         '-',
         { label: 'Delete folder', icon: 'trash', danger: true, action: () => this.deleteItem(node.cid, node.item.id) },
       );
@@ -520,45 +523,58 @@ const WS = {
     }
   },
 
-  /** OpenAPI / Kong YAML for a collection, a folder inside one, or a sidebar folder (all its collections). */
-  async exportYaml(node, format) {
-    try {
-      let title;
-      let description = '';
-      const sources = [];
-      if (node.kind === 'collection') {
-        const collection = await this.ensureCollection(node.cid);
-        if (!collection) return;
-        title = collection.name;
-        description = collection.description || '';
-        sources.push({ collection, items: collection.items });
-      } else if (node.kind === 'reqfolder') {
-        const collection = await this.ensureCollection(node.cid);
-        if (!collection) return;
-        title = `${collection.name} – ${node.item.name}`;
-        sources.push({ collection, items: node.item.items, tagPrefix: [node.item.name] });
-      } else if (node.kind === 'folder') {
-        title = this.folders.get(node.fid)?.name || 'API';
-        const folderIds = new Set([node.fid]);
-        for (let grew = true; grew;) {
-          grew = false;
-          for (const folder of this.folders.values()) {
-            if (!folderIds.has(folder.id) && folderIds.has(folder.parent_id)) {
-              folderIds.add(folder.id);
-              grew = true;
-            }
+  /**
+   * What an export covers: a collection, a folder inside one, or a sidebar
+   * folder (every collection in it and its sub-folders). Null if nothing loaded.
+   */
+  async exportSources(node) {
+    if (node.kind === 'collection') {
+      const collection = await this.ensureCollection(node.cid);
+      if (!collection) return null;
+      return { title: collection.name, description: collection.description || '', sources: [{ collection, items: collection.items }] };
+    }
+    if (node.kind === 'reqfolder') {
+      const collection = await this.ensureCollection(node.cid);
+      if (!collection) return null;
+      return {
+        title: `${collection.name} – ${node.item.name}`,
+        description: node.item.description || '',
+        sources: [{ collection, items: node.item.items, tagPrefix: [node.item.name] }],
+      };
+    }
+    if (node.kind === 'folder') {
+      const folderIds = new Set([node.fid]);
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const folder of this.folders.values()) {
+          if (!folderIds.has(folder.id) && folderIds.has(folder.parent_id)) {
+            folderIds.add(folder.id);
+            grew = true;
           }
         }
-        const cids = [...this.collections.values()].filter((c) => folderIds.has(c.folder_id ?? null)).map((c) => c.id);
-        setSyncState(`Loading ${cids.length} collection${cids.length === 1 ? '' : 's'}…`);
+      }
+      const cids = [...this.collections.values()].filter((c) => folderIds.has(c.folder_id ?? null)).map((c) => c.id);
+      const sources = [];
+      setSyncState(`Loading ${cids.length} collection${cids.length === 1 ? '' : 's'}…`);
+      try {
         for (const cid of cids) {
           const collection = await this.ensureCollection(cid);
           if (collection) sources.push({ collection, items: collection.items, tagPrefix: [collection.name] });
         }
+      } finally {
         setSyncState('');
-      } else {
-        return;
       }
+      return { title: this.folders.get(node.fid)?.name || 'API', description: '', sources };
+    }
+    return null;
+  },
+
+  /** OpenAPI / Kong YAML. */
+  async exportYaml(node, format) {
+    try {
+      const target = await this.exportSources(node);
+      if (!target) return;
+      const { title, description, sources } = target;
 
       const result = format === 'kong' ? buildKongYaml(title, sources) : buildOpenApiYaml(title, sources, description);
       if (!result.operations) {
@@ -572,8 +588,27 @@ const WS = {
         toast(`Exported ${result.operations} request${result.operations === 1 ? '' : 's'} to ${saved.filePath}.${extra}`);
       }
     } catch (error) {
-      setSyncState('');
       toast(error.message, 'error');
+    }
+  },
+
+  /** API document as a Word file. */
+  async exportDocx(node) {
+    try {
+      const target = await this.exportSources(node);
+      if (!target) return;
+      const model = buildDocModel(target.title, target.sources, target.description);
+      if (!model.endpoints.length) {
+        toast('There are no requests to document here.', 'error');
+        return;
+      }
+      setSyncState('Building document…');
+      const saved = await window.desktop.files.saveDocx(`${target.title} - API documentation.docx`, model);
+      if (saved.saved) toast(`Exported API document (${model.endpoints.length} request${model.endpoints.length === 1 ? '' : 's'}) to ${saved.filePath}.`);
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      setSyncState('');
     }
   },
 

@@ -115,9 +115,13 @@ function splitUrl(rawUrl, variables) {
   if (lead && variables.has(lead[1]) && /^[a-z][a-z0-9+.-]*:\/\//i.test(sub(lead[0]))) {
     server = sub(lead[0]);
     pathPart = beforeQuery.slice(lead[0].length);
+  } else if (lead && !/^[a-z][a-z0-9+.-]*:\/\//i.test(sub(lead[0]))) {
+    // Leading variable with no value (or not a URL): it stays a server variable, the rest is the path.
+    server = lead[0];
+    pathPart = beforeQuery.slice(lead[0].length);
   } else {
     // Resolve variables in the host part only; keep the ones in the path as parameters.
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(beforeQuery) || /^{{/.test(beforeQuery) ? beforeQuery : `http://${beforeQuery}`;
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(beforeQuery) ? beforeQuery : `http://${beforeQuery}`;
     const match = withScheme.match(/^([^/]*\/\/[^/]*)(.*)$/) || [null, withScheme, ''];
     server = sub(match[1]);
     pathPart = match[2];
@@ -125,7 +129,7 @@ function splitUrl(rawUrl, variables) {
   // A server URL that still has {{x}} becomes an OpenAPI server variable {x}.
   const serverVars = {};
   server = server.replace(/\/+$/, '').replace(VAR_RE, (_m, name) => {
-    serverVars[safeName(name)] = { default: '' };
+    serverVars[safeName(name)] = { default: String(variables.get(name) ?? '') };
     return `{${safeName(name)}}`;
   });
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(server) && !server.startsWith('{')) server = `http://${server}`;

@@ -228,3 +228,162 @@ async function api(method, path, body) {
   }
   return result.data;
 }
+
+/* ---------------- response formatting (XML / HTML) ---------------- */
+
+const VOID_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+/** Re-indents XML or HTML; content of script/style/pre/textarea is kept as is. */
+function formatMarkup(text, isHtml) {
+  const tokens = String(text).match(/<(script|style|pre|textarea)\b[^>]*>[\s\S]*?<\/\1\s*>|<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<![^>]*>|<\?[\s\S]*?\?>|<\/?[A-Za-z][^>]*>|[^<]+|</g) || [];
+  const out = [];
+  let depth = 0;
+  const pad = () => '  '.repeat(Math.max(depth, 0));
+  const tagName = (tok) => (tok.match(/^<\/?\s*([A-Za-z][\w:.-]*)/) || [])[1]?.toLowerCase() || '';
+  const isOpen = (tok) => /^<[A-Za-z]/.test(tok) && !/\/\s*>$/.test(tok) && !(isHtml && VOID_TAGS.has(tagName(tok)))
+    && !/^<(script|style|pre|textarea)\b[\s\S]*<\/\1\s*>$/i.test(tok);
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok.startsWith('<') || tok === '<') {
+      const t = tok.trim();
+      if (t) out.push(pad() + t.replace(/\s*\n\s*/g, ' '));
+    } else if (tok.startsWith('</')) {
+      depth--;
+      out.push(pad() + tok);
+    } else if (isOpen(tok)) {
+      // <tag>short text</tag> stays on one line.
+      const text = tokens[i + 1];
+      const close = tokens[i + 2];
+      if (text !== undefined && !text.startsWith('<') && close && close.startsWith('</') && tagName(close) === tagName(tok)
+        && text.trim().length <= 120 && !text.trim().includes('\n')) {
+        out.push(pad() + tok + text.trim() + close);
+        i += 2;
+      } else {
+        out.push(pad() + tok);
+        depth++;
+      }
+    } else {
+      out.push(pad() + tok);
+    }
+  }
+  return out.join('\n');
+}
+
+/** Colours tags, attributes and comments; returns HTML. */
+function highlightMarkup(text) {
+  return escapeHtml(text).replace(
+    /(&lt;!--[\s\S]*?--&gt;)|(&lt;\/?)([A-Za-z][\w:.-]*)([\s\S]*?)(\/?&gt;)/g,
+    (_m, comment, open, name, attrs, close) => (comment
+      ? `<span class="m-com">${comment}</span>`
+      : `<span class="m-tag">${open}${name}</span>${attrs.replace(/([\w:.@-]+)(\s*=\s*)("[^"]*"|'[^']*')/g,
+        '<span class="m-attr">$1</span>$2<span class="m-val">$3</span>')}<span class="m-tag">${close}</span>`),
+  );
+}
+
+/** Best guess of a response body's format: json, xml, html or text. */
+function detectFormat(contentType, body) {
+  const type = String(contentType || '').toLowerCase();
+  if (/json/.test(type)) return 'json';
+  if (/html/.test(type)) return 'html';
+  if (/xml/.test(type)) return 'xml';
+  const text = String(body || '').trimStart();
+  if (/^[[{]/.test(text) && tryParseJson(text) !== undefined) return 'json';
+  if (/^<!doctype html|^<html[\s>]/i.test(text)) return 'html';
+  if (text.startsWith('<')) return 'xml';
+  return 'text';
+}
+
+/* ---------------- {{variable}} highlighting and hover values ---------------- */
+
+const VAR_TOKEN_RE = /{{\s*([^{}]+?)\s*}}/g;
+let varTipEl = null;
+
+function hideVarTip() {
+  if (varTipEl) varTipEl.hidden = true;
+}
+
+function showVarTip(span, variables) {
+  if (!varTipEl) {
+    varTipEl = h('div', { class: 'var-tip', role: 'tooltip', hidden: true });
+    document.body.append(varTipEl);
+  }
+  const name = span.dataset.name;
+  const defined = variables.has(name);
+  const value = defined ? String(variables.get(name)) : '';
+  varTipEl.replaceChildren(
+    h('div', { class: 'var-tip-head' }, h('span', { class: 'var-tip-name' }, name), h('span', { class: `var-tip-scope ${defined ? '' : 'missing'}` }, defined ? 'Collection variable' : 'Undefined')),
+    defined
+      ? h('div', { class: 'var-tip-value' }, value === '' ? '(empty value)' : value.length > 500 ? `${value.slice(0, 500)}…` : value)
+      : h('div', { class: 'var-tip-missing' }, 'Not defined in this collection. Add it in “Variables, auth & details”.'));
+  varTipEl.hidden = false;
+  const r = span.getBoundingClientRect();
+  const width = varTipEl.offsetWidth;
+  varTipEl.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - width - 8))}px`;
+  const below = r.bottom + 6;
+  varTipEl.style.top = `${below + varTipEl.offsetHeight > window.innerHeight - 8 ? r.top - varTipEl.offsetHeight - 6 : below}px`;
+}
+
+/**
+ * Wraps a single-line input so {{variables}} in it are coloured (defined or not)
+ * and show their value on hover. getVariables() returns a Map of name -> value.
+ * The wrapper's input gets a `repaintVariables()` method for programmatic changes.
+ */
+function variableField(input, getVariables) {
+  const mirror = h('div', { class: 'var-mirror', 'aria-hidden': 'true' });
+  const field = h('div', { class: 'var-field' }, mirror, input);
+  let measured = false;
+
+  const measure = () => {
+    if (measured || !input.isConnected || !input.offsetHeight) return;
+    const cs = getComputedStyle(input);
+    mirror.style.font = cs.font;
+    mirror.style.letterSpacing = cs.letterSpacing;
+    mirror.style.lineHeight = `${input.offsetHeight}px`;
+    mirror.style.paddingLeft = `${parseFloat(cs.paddingLeft) + parseFloat(cs.borderLeftWidth)}px`;
+    mirror.style.paddingRight = `${parseFloat(cs.paddingRight) + parseFloat(cs.borderRightWidth)}px`;
+    measured = true;
+  };
+  const sync = () => {
+    mirror.scrollLeft = input.scrollLeft;
+  };
+  const paint = () => {
+    measure();
+    const variables = getVariables() || new Map();
+    const value = input.value;
+    const nodes = [];
+    let last = 0;
+    for (const match of value.matchAll(VAR_TOKEN_RE)) {
+      if (match.index > last) nodes.push(value.slice(last, match.index));
+      nodes.push(h('span', { class: `var-token ${variables.has(match[1]) ? 'ok' : 'missing'}`, dataset: { name: match[1] } }, match[0]));
+      last = match.index + match[0].length;
+    }
+    nodes.push(`${value.slice(last)} `);
+    mirror.replaceChildren(...nodes);
+    // Only hide the input's own text once the overlay is lined up with it.
+    field.classList.toggle('has-vars', measured && nodes.length > 1);
+    sync();
+  };
+
+  input.addEventListener('input', () => {
+    hideVarTip();
+    paint();
+  });
+  input.addEventListener('scroll', sync);
+  for (const type of ['keyup', 'click', 'select', 'focus']) input.addEventListener(type, () => requestAnimationFrame(sync));
+  input.addEventListener('mouseenter', () => {
+    if (!measured) paint();
+  });
+  input.addEventListener('mousemove', (event) => {
+    const span = [...mirror.querySelectorAll('.var-token')].find((s) => {
+      const r = s.getBoundingClientRect();
+      return event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top - 4 && event.clientY <= r.bottom + 4;
+    });
+    if (span) showVarTip(span, getVariables() || new Map());
+    else hideVarTip();
+  });
+  input.addEventListener('mouseleave', hideVarTip);
+  input.repaintVariables = paint;
+  paint();
+  requestAnimationFrame(paint);
+  return field;
+}

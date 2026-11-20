@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell, Menu } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const { buildDocx } = require('./docx-export');
 
 const DEFAULT_API_BASE_URL = 'https://api.sanjakarobar.com/api';
 const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
@@ -360,6 +361,19 @@ ipcMain.handle('file:saveText', async (_event, { suggestedName, text, filter }) 
   });
   if (canceled || !filePath) return { saved: false };
   await fs.writeFile(filePath, String(text ?? ''), 'utf8');
+  return { saved: true, filePath };
+});
+
+ipcMain.handle('file:saveDocx', async (_event, { suggestedName, model }) => {
+  if (!model || typeof model !== 'object') throw new Error('Nothing to export.');
+  const safeName = String(suggestedName || 'API documentation.docx').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export API document',
+    defaultPath: path.join(app.getPath('documents'), safeName),
+    filters: [{ name: 'Word document', extensions: ['docx'] }],
+  });
+  if (canceled || !filePath) return { saved: false };
+  await fs.writeFile(filePath, await buildDocx(model));
   return { saved: true, filePath };
 });
 

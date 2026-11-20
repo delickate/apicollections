@@ -20,7 +20,7 @@ const Editor = {
       const found = collection && findItem(collection.items, itemId);
       if (!found) return;
       const draft = clone(found.item);
-      this.tabs.push({ key, kind: 'request', cid, itemId, draft, saved: JSON.stringify(draft), sub: 'params', respView: 'body', response: null });
+      this.tabs.push({ key, kind: 'request', cid, itemId, draft, saved: JSON.stringify(draft), sub: 'params', respView: 'pretty', response: null });
     }
     this.activate(key);
   },
@@ -244,6 +244,7 @@ const Editor = {
       },
     }, METHODS.map((method) => h('option', { value: method, selected: method === draft.method }, method)));
 
+    const vars = () => variablesOf(WS.full.get(tab.cid));
     const urlInput = h('input', {
       type: 'text',
       class: 'url-input',
@@ -265,7 +266,7 @@ const Editor = {
       : h('button', { class: 'btn btn-primary send-btn', title: 'Send (Ctrl+Enter)', onclick: () => this.send(tab) }, icon('send'), 'Send');
 
     const urlbar = h('div', { class: 'urlbar' },
-      h('div', { class: 'urlbar-group' }, methodSelect, urlInput),
+      h('div', { class: 'urlbar-group' }, methodSelect, variableField(urlInput, vars)),
       sendButton,
       h('button', { class: 'btn', title: 'Save (Ctrl+S)', onclick: () => this.save(tab) }, 'Save'),
       h('button', { class: 'btn', title: 'Code snippet', onclick: () => this.showCode(tab) }, icon('code'), 'Code'));
@@ -298,21 +299,22 @@ const Editor = {
           kvEditor(parseQuery(draft.url).map(([key, value]) => ({ key, value })), (rows) => {
             draft.url = withQuery(draft.url, rows.map((row) => [row.key, row.value]));
             urlInput.value = draft.url;
+            urlInput.repaintVariables?.();
             changed();
             renderSubTabs();
-          }, { keyPlaceholder: 'Query parameter', toggle: false }),
+          }, { keyPlaceholder: 'Query parameter', toggle: false, variables: vars }),
           h('p', { class: 'hint' }, 'Parameters stay in sync with the URL.'));
       } else if (tab.sub === 'headers') {
         subPane.replaceChildren(kvEditor(draft.headers, (rows) => {
           draft.headers = rows;
           changed();
           renderSubTabs();
-        }, { keyPlaceholder: 'Header' }), h('p', { class: 'hint' }, 'Content-Type is added automatically for JSON, text and form bodies unless you set one.'));
+        }, { keyPlaceholder: 'Header', variables: vars }), h('p', { class: 'hint' }, 'Content-Type is added automatically for JSON, text and form bodies unless you set one.'));
       } else if (tab.sub === 'body') {
         this.bodyEditor(subPane, draft.body, () => {
           changed();
           renderSubTabs();
-        });
+        }, vars);
       } else {
         subPane.replaceChildren(authEditor(draft.auth, true, changed, WS.full.get(tab.cid)?.auth));
       }
@@ -337,7 +339,7 @@ const Editor = {
     return editor;
   },
 
-  bodyEditor(pane, body, changed) {
+  bodyEditor(pane, body, changed, variables = null) {
     const modes = [['none', 'None'], ['json', 'JSON'], ['raw', 'Text'], ['urlencoded', 'x-www-form-urlencoded'], ['formdata', 'form-data']];
     const content = h('div');
     const group = `body-mode-${uid()}`;
@@ -400,7 +402,7 @@ const Editor = {
         content.replaceChildren(h('div', { style: { height: '10px' } }), kvEditor(body[body.mode] || [], (rows) => {
           body[body.mode] = rows;
           changed();
-        }, { keyPlaceholder: 'Field', files: isForm ? () => window.desktop.files.pickUpload() : null }),
+        }, { keyPlaceholder: 'Field', files: isForm ? () => window.desktop.files.pickUpload() : null, variables }),
         isForm ? h('p', { class: 'hint' }, 'Sent as multipart/form-data. Switch a field to File to attach a file from this computer.') : null);
       } else {
         content.replaceChildren(h('p', { class: 'hint' }, 'This request does not send a body.'));
@@ -446,7 +448,8 @@ const Editor = {
         onclick: () => navigator.clipboard.writeText(response.body).then(() => toast('Response copied.')),
       }, icon('copy')) : null);
 
-    const views = [['body', 'Body'], ['raw', 'Raw'], ['headers', `Headers (${response.headers.length})`]];
+    if (!['pretty', 'raw', 'preview', 'headers'].includes(tab.respView)) tab.respView = 'pretty';
+    const views = [['pretty', 'Pretty'], ['raw', 'Raw'], ['preview', 'Preview'], ['headers', `Headers (${response.headers.length})`]];
     for (const [id, label] of views) {
       tabs.append(h('button', {
         class: `subtab ${tab.respView === id ? 'active' : ''}`,
@@ -458,22 +461,28 @@ const Editor = {
     }
     tabs.append(meta);
 
+    const body = response.body;
     if (tab.respView === 'headers') {
       pane.append(h('table', { class: 'headers-table' }, response.headers.map(([key, value]) => h('tr', {}, h('td', {}, key), h('td', {}, value)))));
-    } else if (response.body === null) {
+    } else if (body === null) {
       if (/^image\//i.test(response.contentType) && response.bodyBase64) {
         pane.append(h('img', { src: `data:${response.contentType.split(';')[0]};base64,${response.bodyBase64}`, style: { maxWidth: '100%' }, alt: 'Image response' }));
       } else {
         pane.append(h('div', { class: 'resp-empty' }, `Binary response (${response.contentType || 'unknown type'}, ${formatBytes(response.size)}).`));
       }
-    } else if (tab.respView === 'body') {
-      const pre = h('pre', { class: 'code-view' });
-      const parsed = tryParseJson(response.body);
-      if (parsed !== undefined && response.body.length < 3_000_000) pre.innerHTML = highlightJson(JSON.stringify(parsed, null, 2));
-      else pre.textContent = response.body || '(empty body)';
-      pane.append(pre);
+    } else if (tab.respView === 'pretty') {
+      pane.append(...this.prettyBody(tab, response));
+    } else if (tab.respView === 'preview') {
+      const detected = detectFormat(response.contentType, body);
+      if (detected === 'html' || (detected === 'xml' && /<html[\s>]/i.test(body))) {
+        pane.classList.add('preview');
+        pane.append(h('iframe', { class: 'resp-preview', sandbox: '', srcdoc: body, title: 'Response preview' }),
+          h('p', { class: 'hint' }, 'Preview of the HTML response. Scripts and external files (images, styles from other sites) are blocked.'));
+      } else {
+        pane.append(h('pre', { class: 'code-view' }, body || '(empty body)'));
+      }
     } else {
-      pane.append(h('pre', { class: 'code-view' }, response.body || '(empty body)'));
+      pane.append(h('pre', { class: 'code-view' }, body || '(empty body)'));
     }
     return [tabs, pane];
   },
@@ -565,6 +574,59 @@ const Editor = {
     });
   },
 
+  /** Pretty view: the body formatted as the chosen format (JSON by default, remembered). */
+  prettyBody(tab, response) {
+    const body = response.body;
+    let format = 'json';
+    try {
+      format = localStorage.getItem('responseFormat') || 'json';
+    } catch {
+      /* storage unavailable */
+    }
+    if (!RESPONSE_FORMATS.some(([id]) => id === format)) format = 'json';
+    const effective = format === 'auto' ? detectFormat(response.contentType, body) : format;
+
+    const select = h('select', {
+      class: 'resp-format',
+      title: 'Response format',
+      onchange: (event) => {
+        try {
+          localStorage.setItem('responseFormat', event.target.value);
+        } catch {
+          /* storage unavailable */
+        }
+        tab.renderResponse();
+      },
+    }, RESPONSE_FORMATS.map(([id, label]) => h('option', { value: id, selected: id === format }, label)));
+
+    const pre = h('pre', { class: 'code-view' });
+    let note = null;
+    if (!body) {
+      pre.textContent = '(empty body)';
+    } else if (body.length > 3_000_000) {
+      pre.textContent = body;
+      note = 'Large response: shown without formatting.';
+    } else if (effective === 'json') {
+      const parsed = tryParseJson(body);
+      if (parsed !== undefined) {
+        pre.innerHTML = highlightJson(JSON.stringify(parsed, null, 2));
+      } else {
+        pre.textContent = body;
+        const guess = detectFormat(response.contentType, body);
+        note = `Not valid JSON, shown as text${guess !== 'json' && guess !== 'text' ? ` (looks like ${guess.toUpperCase()})` : ''}.`;
+      }
+    } else if (effective === 'xml' || effective === 'html') {
+      pre.innerHTML = highlightMarkup(formatMarkup(body, effective === 'html'));
+    } else {
+      pre.textContent = body;
+    }
+
+    const toolbar = h('div', { class: 'resp-toolbar' }, select,
+      format === 'auto' && body ? h('span', { class: 'hint' }, `Detected: ${RESPONSE_FORMATS.find(([id]) => id === effective)?.[1] || effective}`) : null,
+      note ? h('span', { class: 'resp-note' }, note) : null);
+    return [toolbar, pre];
+  },
+
   async send(tab = this.active()) {
     if (!tab || tab.kind !== 'request' || tab.sending) return;
     const collection = WS.full.get(tab.cid);
@@ -582,7 +644,7 @@ const Editor = {
     const response = await window.desktop.http.send({ id: tab.sendId, ...prepared });
     tab.sending = false;
     tab.response = response;
-    if (response.ok && tab.respView === 'headers') tab.respView = 'body';
+    if (response.ok && tab.respView === 'headers') tab.respView = 'pretty';
     if (this.active() === tab) this.render();
   },
 
@@ -746,6 +808,8 @@ function countItems(items) {
   }
   return { requests, folders };
 }
+
+const RESPONSE_FORMATS = [['json', 'JSON'], ['xml', 'XML'], ['html', 'HTML'], ['text', 'Text'], ['auto', 'Auto']];
 
 function tryParseJson(text) {
   const trimmed = (text || '').trim();
