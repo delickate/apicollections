@@ -342,6 +342,9 @@ const WS = {
         { label: 'New collection', icon: 'collectionPlus', action: () => this.newCollection(node.fid) },
         { label: 'Import into this folder…', icon: 'download', action: () => this.importFiles(node.fid) },
         '-',
+        { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
+        { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
+        '-',
         { label: 'Rename', icon: 'edit', action: () => this.rename(node) },
         this.folders.get(node.fid)?.parent_id ? { label: 'Move to top level', icon: 'arrowUp', action: () => this.moveFolder(node.fid, null) } : null,
         '-',
@@ -359,6 +362,8 @@ const WS = {
         '-',
         { label: 'Export (JSON)', icon: 'upload', action: () => this.exportCollection(node.cid, 'native') },
         { label: 'Export as Postman v2.1', icon: 'upload', action: () => this.exportCollection(node.cid, 'postman') },
+        { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
+        { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
         '-',
         { label: 'Delete collection', icon: 'trash', danger: true, action: () => this.deleteCollection(node.cid) },
       );
@@ -369,6 +374,9 @@ const WS = {
         '-',
         { label: 'Rename', icon: 'edit', action: () => this.rename(node) },
         { label: 'Duplicate', icon: 'copy', action: () => this.duplicateItem(node.cid, node.item.id) },
+        '-',
+        { label: 'Export as OpenAPI 3 (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'openapi') },
+        { label: 'Export as Kong config (YAML)', icon: 'upload', action: () => this.exportYaml(node, 'kong') },
         '-',
         { label: 'Delete folder', icon: 'trash', danger: true, action: () => this.deleteItem(node.cid, node.item.id) },
       );
@@ -508,6 +516,63 @@ const WS = {
       const result = await window.desktop.files.saveJson(fileName, data);
       if (result.saved) toast(`Exported to ${result.filePath}`);
     } catch (error) {
+      toast(error.message, 'error');
+    }
+  },
+
+  /** OpenAPI / Kong YAML for a collection, a folder inside one, or a sidebar folder (all its collections). */
+  async exportYaml(node, format) {
+    try {
+      let title;
+      let description = '';
+      const sources = [];
+      if (node.kind === 'collection') {
+        const collection = await this.ensureCollection(node.cid);
+        if (!collection) return;
+        title = collection.name;
+        description = collection.description || '';
+        sources.push({ collection, items: collection.items });
+      } else if (node.kind === 'reqfolder') {
+        const collection = await this.ensureCollection(node.cid);
+        if (!collection) return;
+        title = `${collection.name} – ${node.item.name}`;
+        sources.push({ collection, items: node.item.items, tagPrefix: [node.item.name] });
+      } else if (node.kind === 'folder') {
+        title = this.folders.get(node.fid)?.name || 'API';
+        const folderIds = new Set([node.fid]);
+        for (let grew = true; grew;) {
+          grew = false;
+          for (const folder of this.folders.values()) {
+            if (!folderIds.has(folder.id) && folderIds.has(folder.parent_id)) {
+              folderIds.add(folder.id);
+              grew = true;
+            }
+          }
+        }
+        const cids = [...this.collections.values()].filter((c) => folderIds.has(c.folder_id ?? null)).map((c) => c.id);
+        setSyncState(`Loading ${cids.length} collection${cids.length === 1 ? '' : 's'}…`);
+        for (const cid of cids) {
+          const collection = await this.ensureCollection(cid);
+          if (collection) sources.push({ collection, items: collection.items, tagPrefix: [collection.name] });
+        }
+        setSyncState('');
+      } else {
+        return;
+      }
+
+      const result = format === 'kong' ? buildKongYaml(title, sources) : buildOpenApiYaml(title, sources, description);
+      if (!result.operations) {
+        toast('There are no requests with a URL to export here.', 'error');
+        return;
+      }
+      const fileName = `${title}.${format === 'kong' ? 'kong' : 'openapi'}.yaml`;
+      const saved = await window.desktop.files.saveText(fileName, result.yaml, { title: format === 'kong' ? 'Export Kong config' : 'Export OpenAPI', name: 'YAML', extensions: ['yaml', 'yml'] });
+      if (saved.saved) {
+        const extra = result.skipped ? ` ${result.skipped} duplicate or empty request${result.skipped === 1 ? ' was' : 's were'} left out.` : '';
+        toast(`Exported ${result.operations} request${result.operations === 1 ? '' : 's'} to ${saved.filePath}.${extra}`);
+      }
+    } catch (error) {
+      setSyncState('');
       toast(error.message, 'error');
     }
   },

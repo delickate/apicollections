@@ -44,6 +44,8 @@ const ICON_PATHS = {
   server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
   arrowUp: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  code: '<path d="m8 6-6 6 6 6M16 6l6 6-6 6"/>',
+  paperclip: '<path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
 };
 
 function icon(name) {

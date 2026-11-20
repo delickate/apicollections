@@ -267,7 +267,8 @@ const Editor = {
     const urlbar = h('div', { class: 'urlbar' },
       h('div', { class: 'urlbar-group' }, methodSelect, urlInput),
       sendButton,
-      h('button', { class: 'btn', title: 'Save (Ctrl+S)', onclick: () => this.save(tab) }, 'Save'));
+      h('button', { class: 'btn', title: 'Save (Ctrl+S)', onclick: () => this.save(tab) }, 'Save'),
+      h('button', { class: 'btn', title: 'Code snippet', onclick: () => this.showCode(tab) }, icon('code'), 'Code'));
 
     // ---- request sub-tabs
     const subPane = h('div', { class: 'pane' });
@@ -395,10 +396,12 @@ const Editor = {
       }
       content.removeAttribute('style');
       if (body.mode === 'urlencoded' || body.mode === 'formdata') {
+        const isForm = body.mode === 'formdata';
         content.replaceChildren(h('div', { style: { height: '10px' } }), kvEditor(body[body.mode] || [], (rows) => {
           body[body.mode] = rows;
           changed();
-        }, { keyPlaceholder: 'Field' }), body.mode === 'formdata' ? h('p', { class: 'hint' }, 'Text fields are sent as multipart/form-data.') : null);
+        }, { keyPlaceholder: 'Field', files: isForm ? () => window.desktop.files.pickUpload() : null }),
+        isForm ? h('p', { class: 'hint' }, 'Sent as multipart/form-data. Switch a field to File to attach a file from this computer.') : null);
       } else {
         content.replaceChildren(h('p', { class: 'hint' }, 'This request does not send a body.'));
       }
@@ -500,6 +503,66 @@ const Editor = {
     } catch (error) {
       if (!(error instanceof ApiError)) toast(error.message, 'error');
     }
+  },
+
+  showCode(tab = this.active()) {
+    if (!tab || tab.kind !== 'request') return;
+    let prepared;
+    try {
+      prepared = prepareRequest(tab.draft, WS.full.get(tab.cid));
+    } catch (error) {
+      toast(error.message, 'error');
+      return;
+    }
+    const bodyMode = tab.draft.body.mode;
+    let lang = 'curl';
+    try {
+      lang = localStorage.getItem('codeLanguage') || 'curl';
+    } catch {
+      /* storage unavailable */
+    }
+    if (!CODE_LANGUAGES.some((x) => x.id === lang)) lang = 'curl';
+
+    openModal((close) => {
+      const pre = h('pre', { class: 'code-view snippet-code' });
+      const list = h('div', { class: 'snippet-langs', role: 'listbox' });
+      const show = () => {
+        try {
+          pre.textContent = codeSnippet(lang, prepared, bodyMode);
+        } catch (error) {
+          pre.textContent = `Could not generate this snippet: ${error.message}`;
+        }
+        list.replaceChildren(...CODE_LANGUAGES.map((x) => h('button', {
+          type: 'button',
+          role: 'option',
+          class: `snippet-lang ${x.id === lang ? 'active' : ''}`,
+          'aria-selected': String(x.id === lang),
+          onclick: () => {
+            lang = x.id;
+            try {
+              localStorage.setItem('codeLanguage', lang);
+            } catch {
+              /* storage unavailable */
+            }
+            show();
+          },
+        }, x.label)));
+      };
+      show();
+      const copy = h('button', {
+        type: 'button',
+        class: 'btn btn-primary',
+        autofocus: true,
+        onclick: () => navigator.clipboard.writeText(pre.textContent).then(() => toast('Code copied.'), () => toast('Could not copy.', 'error')),
+      }, icon('copy'), 'Copy');
+      return h('div', { class: 'modal snippet-modal' },
+        h('div', { class: 'snippet-head' },
+          h('h3', {}, 'Code snippet'),
+          h('span', { class: 'hint' }, 'Variables and auth are filled in.'),
+          h('button', { type: 'button', class: 'icon-btn', title: 'Close', onclick: () => close(null) }, icon('close'))),
+        h('div', { class: 'snippet-body' }, list, pre),
+        h('div', { class: 'modal-actions' }, copy));
+    });
   },
 
   async send(tab = this.active()) {
@@ -647,7 +710,11 @@ function prepareRequest(draft, collection) {
     body = new URLSearchParams(draft.body.urlencoded.filter((x) => x.enabled && x.key).map((x) => [sub(x.key), sub(x.value)])).toString();
     if (!hasHeader('Content-Type')) setHeader('Content-Type', 'application/x-www-form-urlencoded');
   } else if (mode === 'formdata') {
-    body = { formdata: draft.body.formdata.filter((x) => x.enabled && x.key).map((x) => [sub(x.key), sub(x.value)]) };
+    body = {
+      formdata: draft.body.formdata.filter((x) => x.enabled && x.key).map((x) => (x.type === 'file'
+        ? { key: sub(x.key), file: x.src || '' }
+        : { key: sub(x.key), value: sub(x.value) })),
+    };
   }
 
   return { method: draft.method, url: parsed.toString(), headers, body };

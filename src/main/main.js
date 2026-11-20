@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 const DEFAULT_API_BASE_URL = 'https://api.sanjakarobar.com/api';
 const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 20 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 
 const isDev = process.argv.includes('--dev');
 let mainWindow = null;
@@ -17,6 +18,7 @@ let mainWindow = null;
 
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 const sessionFile = () => path.join(app.getPath('userData'), 'session.bin');
+const approvedFilesFile = () => path.join(app.getPath('userData'), 'approved-files.json');
 
 let settings = { apiBaseUrl: process.env.API_BASE_URL || DEFAULT_API_BASE_URL };
 let session = null; // { token, user }
@@ -57,6 +59,72 @@ async function saveSession() {
   const data = safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(text) : Buffer.from(text, 'utf8');
   await fs.mkdir(path.dirname(sessionFile()), { recursive: true });
   await fs.writeFile(sessionFile(), data);
+}
+
+/*
+ * Files the user has chosen on this computer for form-data uploads. A collection
+ * can come from anyone (import, shared account), so a request may only upload a
+ * file the user picked here or explicitly allows when sending.
+ */
+let approvedFiles = new Set();
+
+const fileKey = (filePath) => path.resolve(filePath).toLowerCase();
+
+async function loadApprovedFiles() {
+  try {
+    const list = JSON.parse(await fs.readFile(approvedFilesFile(), 'utf8'));
+    if (Array.isArray(list)) approvedFiles = new Set(list.filter((x) => typeof x === 'string'));
+  } catch {
+    /* none yet */
+  }
+}
+
+async function approveFile(filePath) {
+  approvedFiles.add(fileKey(filePath));
+  await fs.mkdir(path.dirname(approvedFilesFile()), { recursive: true });
+  await fs.writeFile(approvedFilesFile(), JSON.stringify([...approvedFiles].slice(-2000), null, 2));
+}
+
+const UPLOAD_TYPES = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.svg': 'image/svg+xml', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.pdf': 'application/pdf',
+  '.json': 'application/json', '.xml': 'application/xml', '.txt': 'text/plain', '.csv': 'text/csv', '.html': 'text/html',
+  '.zip': 'application/zip', '.doc': 'application/msword', '.xls': 'application/vnd.ms-excel',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+};
+
+async function readUploadFile(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('A form-data file field has no file selected.');
+  if (!path.isAbsolute(filePath)) throw new Error(`File path must be absolute: ${filePath}`);
+  const name = path.basename(filePath);
+
+  if (!approvedFiles.has(fileKey(filePath))) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Upload file', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Upload a file?',
+      message: `This request will upload a file from your computer:
+${filePath}`,
+      detail: 'It was not chosen on this computer (for example it came from an imported collection). Only allow it if you expect this request to send it.',
+    });
+    if (response !== 0) throw new Error(`Upload of ${name} was not allowed.`);
+    await approveFile(filePath);
+  }
+
+  let stat;
+  try {
+    stat = await fs.stat(filePath);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  if (!stat.isFile()) throw new Error(`Not a file: ${filePath}`);
+  if (stat.size > MAX_UPLOAD_BYTES) throw new Error(`${name} is larger than 200 MB.`);
+  const type = UPLOAD_TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream';
+  return { name, type, data: await fs.readFile(filePath) };
 }
 
 function normaliseBaseUrl(value) {
@@ -175,8 +243,21 @@ ipcMain.handle('http:send', async (_event, request) => {
     let body = ['GET', 'HEAD'].includes(request.method) ? undefined : request.body ?? undefined;
     if (body && typeof body === 'object' && Array.isArray(body.formdata)) {
       const form = new FormData();
-      for (const [key, value] of body.formdata) form.append(String(key), String(value));
+      for (const field of body.formdata) {
+        if (field && typeof field.file === 'string') {
+          const file = await readUploadFile(field.file);
+          form.append(String(field.key), new Blob([file.data], { type: file.type }), file.name);
+        } else if (field) {
+          form.append(String(field.key), String(field.value ?? ''));
+        }
+      }
       body = form; // fetch sets the multipart Content-Type with its boundary
+      // A Content-Type typed by the user would lack the boundary and break the upload.
+      for (const name of Object.keys(request.headers || {})) {
+        if (name.toLowerCase() === 'content-type' && /multipart\/form-data/i.test(request.headers[name]) && !/boundary=/i.test(request.headers[name])) {
+          delete request.headers[name];
+        }
+      }
     }
 
     const response = await fetch(url, {
@@ -269,6 +350,19 @@ ipcMain.handle('file:saveJson', async (_event, { suggestedName, data }) => {
   return { saved: true, filePath };
 });
 
+ipcMain.handle('file:saveText', async (_event, { suggestedName, text, filter }) => {
+  const safeName = String(suggestedName || 'export.txt').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+  const extensions = Array.isArray(filter?.extensions) ? filter.extensions.map(String).filter((x) => /^[a-z0-9]{1,8}$/i.test(x)) : [];
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: String(filter?.title || 'Export'),
+    defaultPath: path.join(app.getPath('documents'), safeName),
+    filters: extensions.length ? [{ name: String(filter.name || 'File'), extensions }] : [],
+  });
+  if (canceled || !filePath) return { saved: false };
+  await fs.writeFile(filePath, String(text ?? ''), 'utf8');
+  return { saved: true, filePath };
+});
+
 ipcMain.handle('file:openJson', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     title: 'Import collection',
@@ -292,6 +386,16 @@ ipcMain.handle('file:openJson', async () => {
     }
   }
   return { files };
+});
+
+ipcMain.handle('file:pickUpload', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select file to upload',
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths.length) return null;
+  await approveFile(filePaths[0]);
+  return filePaths[0];
 });
 
 ipcMain.handle('shell:openExternal', (_event, url) => {
@@ -356,6 +460,7 @@ app.whenReady().then(async () => {
   app.setAppUserModelId('com.delickate.api-collections');
   await loadSettings();
   await loadSession();
+  await loadApprovedFiles();
   createWindow();
 
   app.on('activate', () => {
